@@ -1,240 +1,71 @@
-# Migration and Read Comparison
+# Assignment: Repair, Prove and Document the ShipHub Stack
 
-# Before Migration
+## Fault 1: MongoDB image incompatible with the host kernel
 
-**ORD-LEGACY-002**
+Symptom: MongoDB container exited during startup.
+Evidence:`docker compose ps -a` showed `Exited (1)`. Timestamped logs reported a known incompatibility with Linux kernel 6.19 and newer. Host kernel: `7.0.0-43-generic`.
+Cause: The original `mongo:8.0` image could not start correctly on this host.
+Fix:Changed the image to `mongo:7.0`.
+Proof: MongoDB started and passed its health check.
 
-Mongoose read showed `priority: 'normal'` because of the schema default.
-Raw MongoDB read did not show the priority field.
-Raw normal priority count was 2
+## Fault 2: Incorrect MongoDB connection address
 
+Symptom:The API could not connect to MongoDB when running inside Docker.
+Evidence:The original `.env` used `mongodb://127.0.0.1:27017/shiphub`.
+Cause:Inside the API container, `127.0.0.1` refers to the API container itself, not the MongoDB container.
+Fix:Changed the URI to `mongodb://mongo:27017/shiphub`, using the Compose service name.
+Proof: API logs showed `MongoDB connected successfully`, and the API became healthy.
 
-Mongoose read:
-{
-  priority: 'normal',
-  _id: new ObjectId('6ae8bb28a070d5c62b104ff8'),
-  id: 'ORD-LEGACY-002',
-  customer: 'Test Customer 2',
-  product: 'Test Product 2',
-  status: 'Pending'
-}
-Raw MongoDB read:
-{
-  _id: new ObjectId('6ae8b9f75f32095b3be9436c'),
-  id: 'ORD-LEGACY-002'ye s,
-  customer: 'Test Customer',
-  product: 'Test Product',
-  status: 'Pending'
-}
-Raw normal priority count: 2
+## Fault 3: Missing MongoDB configuration in the example environment file
 
-# Migration Result
+Symptom: The example environment file did not provide the MongoDB connection setting.
+Evidence: The original `shiphub-api/.env.example` contained only `PORT` and `LOG_LEVEL`.
+Cause: The required `MONGODB_URI` setting was missing.
+Fix: Added `MONGODB_URI=mongodb://mongo:27017/shiphub`.
+Proof: The API and migration service started successfully using the Compose environment configuration.
 
-Priority migration completed
-Documents matched: 1
-Documents modified: 1
+## Fault 4: Missing service health checks and startup dependencies
 
-# After Migration – ORD-LEGACY-002
+Symptom: The original Compose configuration did not verify database readiness before starting dependent services.
+Evidence: The original configuration had no MongoDB health check or API health check.
+Cause: Container startup alone does not guarantee that the database is ready to accept connections.
+Fix: Added MongoDB and API health checks, `service_healthy` for MongoDB dependencies, and `service_completed_successfully` for the migration dependency.
+Proof: `docker compose up -d --build --wait` completed with MongoDB and API healthy and migration exited with code 0.
 
-Mongoose read:
-{
-  _id: new ObjectId('6ae8bb28a070d5c62b104ff8'),
-  id: 'ORD-LEGACY-002',
-  customer: 'Test Customer 2',
-  product: 'Test Product 2',
-  status: 'Pending',
-  priority: 'normal'
-}
-Raw MongoDB read:
-{
-  _id: new ObjectId('6ae8bb28a070d5c62b104ff8'),
-  id: 'ORD-LEGACY-002',
-  customer: 'Test Customer 2',
-  product: 'Test Product 2',
-  status: 'Pending',
-  priority: 'normal'
-}
-Raw normal priority count: 3
+## Fault 5: Migration was not a separate Compose service
 
+Symptom: The original Compose configuration did not run the priority migration as part of stack startup.
+Evidence: There was no migration service in the original Compose configuration.
+Cause: Database migration execution was not included in the startup sequence.
+Fix: Added a separate `migrate` service that runs `migrations/add-priority.js` after MongoDB becomes healthy.
+Proof: `docker compose ps -a` showed `shiphub-migrate-1` as `Exited (0)`.
 
-# Query Optimization and Indexing
+## Fault 6: Missing convenience scripts
 
-Query Used
+Symptom: The root package did not provide the required `npm run up` and `npm run down` commands.
+Evidence: The original root package scripts did not contain these commands.
+Cause: Compose startup and shutdown commands were not defined as npm scripts.
+Fix: Added `up` and `down` scripts to the root `package.json`.
+Proof: Both `npm run up` and `npm run down` executed successfully.
 
-Order.find({ priority: 'high' })
-  .sort({ createdAt: -1, id: 1 })
-  .limit(20);
+## Verification Evidence
 
-Index Created
+`docker compose config --quiet` completed without errors.
+Three clean startup runs completed successfully using `npm run up`.
+Each successful run showed MongoDB healthy, API healthy, and migration exited with code 0.
+Created order: `ORD-1795606933582`.
+Ran `npm run down` followed by `npm run up`.
+Retrieved the same order successfully using `GET /orders/ORD-1795606933582`.
+This proved that the MongoDB volume preserved order data across a normal Compose shutdown and restart.
 
-{
-  priority: 1,
-  createdAt: -1,
-  id: 1
-}
+### Why use service_healthy instead of short dependency syntax?
 
-# Before Index
+Short dependency syntax waits for a container to start, not for its service to become ready. `service_healthy` waits until the health check succeeds. This prevents the API and migration from trying to connect to MongoDB before it is ready.
 
-Query plan: COLLSCAN
-Documents examined: 50,003
-Index keys examined: 0
-Documents returned: 20
-Execution time: 20ms
+### Why keep migration as a separate service?
 
-# After Index
+Migration is a one-time database task, not a long-running API process. Keeping it separate makes its success or failure visible and allows the API to start only after migration completes successfully.
 
-Query plan: IXSCAN
-Documents examined: 20
-Index keys examined: 20
-Documents returned: 20
-Execution time: 9ms
+### One remaining weakness
 
-
-# Observation
-
-Before indexing, MongoDB performed a collection scan and examined 50,003 documents.
-
-After creating the compound index, MongoDB used an index scan and examined only 20 documents to return 20 results.
-
-The compound index supports the priority filter and the requested sort order. It improves query efficiency, but indexes require additional storage and can increase write overhead
-
-
-
-# Idempotency and API Restart Test
-
-Test details:
-
-Idempotency key: test-key-001
-
-Customer: Bhuvana
-
-Product: Test Product
-
-Order ID: ORD-1793695798415
-
-# First POST request
-
-HTTP/1.1 201 Created
-X-Powered-By: Express
-Access-Control-Allow-Origin: *
-Content-Type: application/json; charset=utf-8
-Content-Length: 189
-ETag: W/"bd-xulb8RmkNtTIwwImSFLA4pCb4T4"
-Date: Tue, 03 Nov 2026 08:49:58 GMT
-Connection: keep-alive
-Keep-Alive: timeout=5
-
-{"id":"ORD-1793695798415","customer":"Bhuvana","product":"Test Product","status":"Pending","priority":"normal","createdAt":"2026-11-03T08:49:58.419Z","updatedAt":"2026-11-03T08:49:58.419Z"}
-
-# Repeated POST with same key
-
-HTTP/1.1 200 OK
-X-Powered-By: Express
-Access-Control-Allow-Origin: *
-Content-Type: application/json; charset=utf-8
-Content-Length: 189
-ETag: W/"bd-xulb8RmkNtTIwwImSFLA4pCb4T4"
-Date: Tue, 03 Nov 2026 08:50:43 GMT
-Connection: keep-alive
-Keep-Alive: timeout=5
-
-{"id":"ORD-1793695798415","customer":"Bhuvana","product":"Test Product","status":"Pending","priority":"normal","createdAt":"2026-11-03T08:49:58.419Z","updatedAt":"2026-11-03T08:49:58.419Z"}
-
-# GET order by ID
-
-HTTP/1.1 200 OK
-X-Powered-By: Express
-Access-Control-Allow-Origin: *
-Content-Type: application/json; charset=utf-8
-Content-Length: 189
-ETag: W/"bd-xulb8RmkNtTIwwImSFLA4pCb4T4"
-Date: Tue, 03 Nov 2026 08:52:11 GMT
-Connection: keep-alive
-Keep-Alive: timeout=5
-
-{"id":"ORD-1793695798415","customer":"Bhuvana","product":"Test Product","status":"Pending","priority":"normal","createdAt":"2026-11-03T08:49:58.419Z","updatedA}
-
-# Repeated POST after API restart
-
-HTTP/1.1 200 OK
-X-Powered-By: Express
-Access-Control-Allow-Origin: *
-Content-Type: application/json; charset=utf-8
-Content-Length: 189
-ETag: W/"bd-xulb8RmkNtTIwwImSFLA4pCb4T4"
-Date: Tue, 03 Nov 2026 08:52:57 GMT
-Connection: keep-alive
-Keep-Alive: timeout=5
-
-{"id":"ORD-1793695798415","customer":"Bhuvana","product":"Test Product","status":"Pending","priority":"normal","createdAt":"2026-11-03T08:49:58.419Z","updated"}
-
-Idempotency works across API restarts because the idempotency key is stored in MongoDB. Repeated requests with the same key return the existing order instead of creating another one.
-
-# Creating Another Order After Restart
-
-HTTP/1.1 201 Created
-X-Powered-By: Express
-Access-Control-Allow-Origin: *
-Content-Type: application/json; charset=utf-8
-Content-Length: 197
-ETag: W/"c5-noPyn5n2P40+3El9LFeN6key1ZI"
-Date: Tue, 03 Nov 2026 09:13:52 GMT
-Connection: keep-alive
-Keep-Alive: timeout=5
-
-{"id":"ORD-1793697232330","customer":"Bhuvana","product":"Another Test Product","status":"Pending","priority":"normal","createdAt":"2026-11-03T09:13:52.332Z","updatedAt":"2026-11-03T09:13:52.332Z"}
-
-# Automated Testing
-
-Test database: shiphub_test
-
-Executed npm test using Node.js built-in test runner
-
-npm test
-
-> shiphub-api@1.0.0 test
-> MONGODB_URI=mongodb://127.0.0.1:27017/shiphub_test node --test
-
-[2026-11-03T09:21:30.577Z] [WARN] GET /orders - Invalid priority. Allowed values are low, normal, high
-[2026-11-03T09:21:30.580Z] [WARN] GET /orders - Status: 400 - 5ms
-✔ rejects an invalid priority (68.426823ms)
-[2026-11-03T09:21:30.623Z] [INFO] POST /orders - Status: 201 - 25ms
-✔ creates an order and verifies it exists in the database (36.782149ms)
-ℹ tests 2
-ℹ suites 0
-ℹ pass 2
-ℹ fail 0
-ℹ cancelled 0
-ℹ skipped 0
-ℹ todo 0
-ℹ duration_ms 438.180486
-
-Both automated tests passed, and the tests ran against shiphub_test, keeping the main shiphub database separate
-
-# Database Unavailable Test
-
-**Request:** `GET /orders`
-curl -i http://localhost:3000/orders
-
-# Result: 
-
-HTTP/1.1 503 Service Unavailable
-X-Powered-By: Express
-Access-Control-Allow-Origin: *
-Content-Type: application/json; charset=utf-8
-Content-Length: 60
-ETag: W/"3c-SpDHjBr2kiixsbh/lJAOiOFevCk"
-Date: Wed, 04 Nov 2026 03:59:47 GMT
-Connection: keep-alive
-Keep-Alive: timeout=5
-
-
-# Reflection
-
-
-I used a raw MongoDB collection update for the migration because it updates existing documents directly without relying on Mongoose schema defaults.
-
-## Fragile Aspects
-The migration must be idempotent so repeated runs do not modify already migrated documents.
-The compound index improves reads but adds storage and write overhead.
-Database connection failures must be handled properly by the API.
+The stack does not currently define resource limits for its containers. A service could consume too much CPU or memory and affect the other services on the same host.
