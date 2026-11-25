@@ -1,19 +1,47 @@
-
 name: shiphub
- 
 services:
-
   mongo:
-
-    image: mongo:8.0
-
-    ports: ["27017:27017"]
-
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
     volumes:
-
       - mongo-data:/data/db
- 
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  migrate:
+    build:
+      context: ./shiphub-api
+    command: ["node", "migrations/add-priority.js"]
+    env_file:
+      - ./shiphub-api/.env
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ./shiphub-api
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./shiphub-api/.env
+    depends_on:
+      mongo:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/orders').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
 volumes:
-
   mongo-data:
-
